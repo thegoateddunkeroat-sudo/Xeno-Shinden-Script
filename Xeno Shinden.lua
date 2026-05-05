@@ -23,7 +23,6 @@ local Window = Library:CreateWindow({
 	ToggleKeybind = Enum.KeyCode.RightShift,
 })
 
--- Create Tabs
 local Tabs = {
 	Main = Window:AddTab("Main", "user"),
 	Settings = Window:AddTab("Settings", "settings"),
@@ -33,14 +32,6 @@ local Tabs = {
 -- ============================================================
 -- MAIN TAB - ESP
 -- ============================================================
-
---[[
-	ESP Data Format:
-	
-	Line 1: workspace.LivingThings.[PlayerName].FakeHead.PlrName | Rank (from leaderstats.Rank) | Title (from leaderstats.Jonin)
-	Line 2: Health/MaxHealth | Chakra/MaxChakra (where Chakra has .Value and .MaxValue)
-	Line 3: Distance
-]]
 
 local MainGroupBox = Tabs.Main:AddLeftGroupbox("ESP", "eye")
 
@@ -77,6 +68,15 @@ MainGroupBox:AddToggle("ESPDistance", {
 	Default = true,
 	Callback = function(Value)
 		print("[ESP] Distance:", Value)
+	end,
+})
+
+MainGroupBox:AddToggle("ESPTool", {
+	Text = "Show Tool",
+	Tooltip = "Display tool held below avatar",
+	Default = true,
+	Callback = function(Value)
+		print("[ESP] Tool:", Value)
 	end,
 })
 
@@ -126,239 +126,371 @@ SettingsGroupBox:AddButton({
 	Risky = true,
 })
 
+SettingsGroupBox:AddButton({
+	Text = "Unload",
+	Func = function()
+		showAllDisplayNames()
+		for k, v in pairs(espBillboards)     do v:Destroy() end
+		for k, v in pairs(espToolBillboards) do v:Destroy() end
+		espBillboards     = {}
+		espToolBillboards = {}
+		if espScreenGui then espScreenGui:Destroy() end
+		Library:Unload()
+	end,
+	Tooltip = "Completely unload the UI",
+	Risky = true,
+})
+
 -- ============================================================
 -- ESP RENDERING LOGIC
 -- ============================================================
 
-local espBillboards = {}
-local players = game:GetService("Players")
-local localPlayer = players.LocalPlayer
+local espBillboards     = {}
+local espToolBillboards = {}
+local hiddenNametags    = {}
+local players           = game:GetService("Players")
+local localPlayer       = players.LocalPlayer
 
--- Create a ScreenGui for billboards
-local espScreenGui = nil
-pcall(function()
-	espScreenGui = Instance.new("ScreenGui")
-	espScreenGui.Name = "ESPGui"
-	espScreenGui.ResetOnSpawn = false
-	if localPlayer:FindFirstChild("PlayerGui") then
-		espScreenGui.Parent = localPlayer.PlayerGui
-	else
-		espScreenGui.Parent = localPlayer:WaitForChild("PlayerGui", 10)
+local espScreenGui = Instance.new("ScreenGui")
+espScreenGui.Name = "ESPGui"
+espScreenGui.ResetOnSpawn = false
+espScreenGui.Parent = localPlayer:WaitForChild("PlayerGui")
+
+-- ── Display name hide / restore ──────────────────────────────
+
+local function hideDisplayName(character)
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		hiddenNametags[character.Name] = {
+			displayType = humanoid.DisplayDistanceType,
+		}
+		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
 	end
-	print("[ESP] ScreenGui created successfully")
-end)
+end
 
--- Function to get player info
+local function showDisplayName(characterName)
+	local livingThings = workspace:FindFirstChild("LivingThings")
+	if not livingThings then hiddenNametags[characterName] = nil return end
+	local character = livingThings:FindFirstChild(characterName)
+	if character then
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if humanoid and hiddenNametags[characterName] then
+			humanoid.DisplayDistanceType = hiddenNametags[characterName].displayType
+		end
+	end
+	hiddenNametags[characterName] = nil
+end
+
+local function showAllDisplayNames()
+	local livingThings = workspace:FindFirstChild("LivingThings")
+	if livingThings then
+		for characterName, data in pairs(hiddenNametags) do
+			local character = livingThings:FindFirstChild(characterName)
+			if character then
+				local humanoid = character:FindFirstChildOfClass("Humanoid")
+				if humanoid then
+					humanoid.DisplayDistanceType = data.displayType
+				end
+			end
+		end
+	end
+	hiddenNametags = {}
+end
+
+-- ── Player info getter ────────────────────────────────────────
+
 local function getPlayerInfo(character)
 	local info = {}
-	
-	-- Get name
+
+	-- Name
 	if character:FindFirstChild("FakeHead") and character.FakeHead:FindFirstChild("PlrName") then
-		info.name = character.FakeHead.PlrName.Value or "Unknown"
+		info.name = tostring(character.FakeHead.PlrName.Value)
 	else
 		info.name = character.Name
 	end
-	
-	-- Get rank and title from leaderstats
-	local leaderstats = character.Parent:FindFirstChild("leaderstats")
-	if leaderstats then
-		if leaderstats:FindFirstChild("Rank") then
-			info.rank = tostring(leaderstats.Rank.Value)
+
+	-- Rank, Rating, team color
+	local player = players:FindFirstChild(character.Name)
+	if player then
+		local leaderstats = player:FindFirstChild("leaderstats")
+		if leaderstats then
+			local rankVal  = leaderstats:FindFirstChild("Rank")
+			local titleVal = leaderstats:FindFirstChild("Rating")
+			if rankVal  then info.rank  = tostring(rankVal.Value)  end
+			if titleVal then info.title = tostring(titleVal.Value) end
 		end
-		if leaderstats:FindFirstChild("Jonin") then
-			info.title = tostring(leaderstats.Jonin.Value)
+
+		-- Team color (BrickColor → Color3)
+		if player.Team then
+			info.teamColor = player.TeamColor.Color
 		end
 	end
-	
-	-- Get health
-	if character:FindFirstChild("Humanoid") then
-		info.health = math.floor(character.Humanoid.Health)
-		info.maxHealth = math.floor(character.Humanoid.MaxHealth)
+
+	-- Health
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		info.health    = math.floor(humanoid.Health)
+		info.maxHealth = math.floor(humanoid.MaxHealth)
 	end
-	
-	-- Get chakra
-	if character:FindFirstChild("Chakra") then
-		info.chakra = math.floor(character.Chakra.Value or 0)
-		info.maxChakra = math.floor(character.Chakra.MaxValue or 0)
+
+	-- Chakra
+	local chakra = character:FindFirstChild("Chakra")
+	if chakra then
+		info.chakra    = math.floor(chakra.Value    or 0)
+		info.maxChakra = math.floor(chakra.MaxValue or 0)
 	end
-	
-	-- Get position for distance
-	if character:FindFirstChild("HumanoidRootPart") then
-		local dist = (character.HumanoidRootPart.Position - localPlayer.Character.HumanoidRootPart.Position).Magnitude
-		info.distance = math.floor(dist)
+
+	-- CombatTag (check character first, then player)
+	local combatTag = character:FindFirstChild("CombatTag")
+		or (player and player:FindFirstChild("CombatTag"))
+	if combatTag and tonumber(combatTag.Value) and tonumber(combatTag.Value) > 0 then
+		info.inCombat = true
+	else
+		info.inCombat = false
 	end
-	
+
+	-- Distance
+	local localChar = localPlayer.Character
+	if character:FindFirstChild("HumanoidRootPart") and localChar and localChar:FindFirstChild("HumanoidRootPart") then
+		info.distance = math.floor((character.HumanoidRootPart.Position - localChar.HumanoidRootPart.Position).Magnitude)
+	end
+
+	-- Tool
+	local tool = character:FindFirstChildOfClass("Tool")
+	if tool then info.tool = tool.Name end
+
 	return info
 end
 
--- Function to create or update billboard
-local function createOrUpdateBillboard(character, headPart)
-	local playerName = character.Name
-	local key = playerName
-	
-	-- Remove old billboard if it exists
-	if espBillboards[key] then
-		espBillboards[key]:Destroy()
-		espBillboards[key] = nil
-	end
-	
-	-- Create new billboard
+-- ── Billboard builders ────────────────────────────────────────
+
+local function makeLabel(parent, name, textSize)
+	local label = Instance.new("TextLabel")
+	label.Name = name
+	label.Size = UDim2.new(1, 0, 0, textSize + 2)
+	label.BackgroundTransparency = 1
+	label.RichText = true
+	label.TextColor3 = Color3.fromRGB(255, 255, 255)
+	label.Font = Enum.Font.GothamBold
+	label.TextSize = textSize or 13
+	label.TextStrokeTransparency = 0.4
+	label.TextXAlignment = Enum.TextXAlignment.Center
+	label.TextScaled = false
+	label.Parent = parent
+	return label
+end
+
+-- Main billboard (above head)
+local function createBillboard(character, headPart)
 	local billboard = Instance.new("BillboardGui")
-	billboard.Size = UDim2.new(4, 0, 2.5, 0)
-	billboard.MaxDistance = Toggles.ESPMaxDistance.Value or 100
+	billboard.Size = UDim2.new(10, 0, 0, 80) -- taller to fit combat tag
+	billboard.StudsOffset = Vector3.new(0, 2.8, 0)
+	billboard.MaxDistance = Options.ESPMaxDistance.Value or 100
+	billboard.AlwaysOnTop = true
 	billboard.Adornee = headPart
 	billboard.Parent = espScreenGui
-	
-	-- Create text label
-	local textLabel = Instance.new("TextLabel")
-	textLabel.Size = UDim2.new(1, 0, 1, 0)
-	textLabel.BackgroundTransparency = 1
-	textLabel.TextScaled = true
-	textLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-	textLabel.Font = Enum.Font.GothamBold
-	textLabel.TextStrokeTransparency = 0.5
-	textLabel.Parent = billboard
-	
-	espBillboards[key] = billboard
-	
-	-- Update text
-	local function updateText()
-		if not Toggles.ESPEnabled.Value then return end
-		
-		local info = getPlayerInfo(character)
-		local lines = {}
-		
-		if Toggles.ESPPlayerInfo.Value then
-			local line1 = info.name
-			if info.rank then line1 = line1 .. " | " .. info.rank end
-			if info.title then line1 = line1 .. " | " .. info.title end
-			table.insert(lines, line1)
+
+	local frame = Instance.new("Frame")
+	frame.Size = UDim2.new(1, 0, 1, 0)
+	frame.BackgroundTransparency = 1
+	frame.Parent = billboard
+
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = Enum.FillDirection.Vertical
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.VerticalAlignment = Enum.VerticalAlignment.Center
+	layout.Padding = UDim.new(0, 2)
+	layout.Parent = frame
+
+	-- Order: IN COMBAT → Name/Rank/Title → HP/Chakra → Distance
+	makeLabel(frame, "LabelCombat", 10) -- small red combat tag
+	makeLabel(frame, "LabelInfo",   13)
+	makeLabel(frame, "LabelStats",  13)
+	makeLabel(frame, "LabelDist",   13)
+
+	return billboard
+end
+
+-- Tool billboard (below avatar)
+local function createToolBillboard(rootPart)
+	local billboard = Instance.new("BillboardGui")
+	billboard.Size = UDim2.new(6, 0, 0, 20)
+	billboard.StudsOffset = Vector3.new(0, -3.5, 0)
+	billboard.MaxDistance = Options.ESPMaxDistance.Value or 100
+	billboard.AlwaysOnTop = true
+	billboard.Adornee = rootPart
+	billboard.Parent = espScreenGui
+
+	local label = Instance.new("TextLabel")
+	label.Name = "LabelTool"
+	label.Size = UDim2.new(1, 0, 1, 0)
+	label.BackgroundTransparency = 1
+	label.RichText = true
+	label.TextColor3 = Color3.fromRGB(255, 220, 80)
+	label.Font = Enum.Font.GothamBold
+	label.TextSize = 12
+	label.TextStrokeTransparency = 0.4
+	label.TextXAlignment = Enum.TextXAlignment.Center
+	label.TextScaled = false
+	label.Parent = billboard
+
+	return billboard
+end
+
+-- ── Billboard updaters ────────────────────────────────────────
+
+local function updateBillboard(billboard, info)
+	local frame = billboard:FindFirstChildOfClass("Frame")
+	if not frame then return end
+
+	local labelCombat = frame:FindFirstChild("LabelCombat")
+	local labelInfo   = frame:FindFirstChild("LabelInfo")
+	local labelStats  = frame:FindFirstChild("LabelStats")
+	local labelDist   = frame:FindFirstChild("LabelDist")
+
+	-- IN COMBAT tag (small red, always shown if active regardless of other toggles)
+	if labelCombat then
+		if info.inCombat then
+			labelCombat.Text    = "IN COMBAT"
+			labelCombat.TextColor3 = Color3.fromRGB(255, 50, 50)
+			labelCombat.Visible = true
+		else
+			labelCombat.Visible = false
 		end
-		
+	end
+
+	-- Name | Rank | Title — colored by team color
+	if labelInfo then
+		if Toggles.ESPPlayerInfo.Value then
+			local line1 = info.name or "Unknown"
+			if info.rank  and info.rank  ~= "" then line1 = line1 .. " | " .. info.rank  end
+			if info.title and info.title ~= "" then line1 = line1 .. " | " .. info.title end
+			labelInfo.Text = line1
+			-- Use team color if available, otherwise white
+			if info.teamColor then
+				labelInfo.TextColor3 = info.teamColor
+			else
+				labelInfo.TextColor3 = Color3.fromRGB(255, 255, 255)
+			end
+			labelInfo.Visible = true
+		else
+			labelInfo.Visible = false
+		end
+	end
+
+	-- Health (green) | Chakra (blue)
+	if labelStats then
 		if Toggles.ESPStats.Value then
 			local line2 = ""
 			if info.health then
-				line2 = info.health .. "/" .. info.maxHealth
+				line2 = '<font color="rgb(80,255,80)">' .. info.health .. "/" .. info.maxHealth .. "</font>"
 			end
 			if info.chakra then
-				if line2 ~= "" then line2 = line2 .. " | " end
-				line2 = line2 .. info.chakra .. "/" .. info.maxChakra
+				if line2 ~= "" then line2 = line2 .. "  |  " end
+				line2 = line2 .. '<font color="rgb(80,180,255)">' .. info.chakra .. "/" .. info.maxChakra .. "</font>"
 			end
-			if line2 ~= "" then table.insert(lines, line2) end
+			labelStats.Text    = line2
+			labelStats.Visible = true
+		else
+			labelStats.Visible = false
 		end
-		
-		if Toggles.ESPDistance.Value and info.distance then
-			table.insert(lines, info.distance .. "m")
-		end
-		
-		textLabel.Text = table.concat(lines, "\n")
 	end
-	
-	updateText()
-	return updateText
+
+	-- Distance
+	if labelDist then
+		if Toggles.ESPDistance.Value and info.distance then
+			labelDist.Text    = info.distance .. "m"
+			labelDist.Visible = true
+		else
+			labelDist.Visible = false
+		end
+	end
 end
 
--- Main ESP loop
+local function updateToolBillboard(billboard, info)
+	local label = billboard:FindFirstChild("LabelTool")
+	if not label then return end
+	if Toggles.ESPTool.Value and info.tool then
+		label.Text    = "[" .. info.tool .. "]"
+		label.Visible = true
+	else
+		label.Visible = false
+	end
+end
+
+-- ── Main loop ─────────────────────────────────────────────────
+
 game:GetService("RunService").RenderStepped:Connect(function()
 	if not Toggles.ESPEnabled.Value then
-		-- Clear all billboards if ESP is disabled
-		for k, v in pairs(espBillboards) do
-			if v and v.Parent then
-				v:Destroy()
-			end
-		end
-		espBillboards = {}
+		showAllDisplayNames()
+		for k, v in pairs(espBillboards)     do v:Destroy() end
+		for k, v in pairs(espToolBillboards) do v:Destroy() end
+		espBillboards     = {}
+		espToolBillboards = {}
 		return
 	end
-	
-	if not localPlayer.Character or not localPlayer.Character:FindFirstChild("HumanoidRootPart") then return end
-	if not espScreenGui or not espScreenGui.Parent then return end
-	
-	-- Find LivingThings folder
+
+	local localChar = localPlayer.Character
+	if not localChar or not localChar:FindFirstChild("HumanoidRootPart") then return end
+
 	local livingThings = workspace:FindFirstChild("LivingThings")
-	if not livingThings then 
-		print("[ESP] LivingThings not found")
-		return 
-	end
-	
-	-- Track which players we've seen
+	if not livingThings then return end
+
 	local activePlayers = {}
-	local playerCount = 0
-	
-	-- Check each player in LivingThings
-	for _, playerFolder in pairs(livingThings:GetChildren()) do
-		playerCount = playerCount + 1
-		local character = playerFolder:FindFirstChild("Char")
-		
-		if character and character ~= localPlayer.Character then
-			activePlayers[playerFolder.Name] = true
-			
-			local headPart = character:FindFirstChild("FakeHead") or character:FindFirstChild("Head")
-			if headPart then
-				if not espBillboards[playerFolder.Name] then
-					createOrUpdateBillboard(character, headPart)
-					print("[ESP] Created billboard for:", playerFolder.Name)
-				end
-				
-				-- Update max distance
-				if espBillboards[playerFolder.Name] and espBillboards[playerFolder.Name].Parent then
-					espBillboards[playerFolder.Name].MaxDistance = Toggles.ESPMaxDistance.Value or 100
-					
-					-- Update text
-					local info = getPlayerInfo(character)
-					local textLabel = espBillboards[playerFolder.Name]:FindFirstChildOfClass("TextLabel")
-					if textLabel then
-						local lines = {}
-						
-						if Toggles.ESPPlayerInfo.Value then
-							local line1 = info.name
-							if info.rank then line1 = line1 .. " | " .. info.rank end
-							if info.title then line1 = line1 .. " | " .. info.title end
-							table.insert(lines, line1)
-						end
-						
-						if Toggles.ESPStats.Value then
-							local line2 = ""
-							if info.health then
-								line2 = info.health .. "/" .. info.maxHealth
-							end
-							if info.chakra then
-								if line2 ~= "" then line2 = line2 .. " | " end
-								line2 = line2 .. info.chakra .. "/" .. info.maxChakra
-							end
-							if line2 ~= "" then table.insert(lines, line2) end
-						end
-						
-						if Toggles.ESPDistance.Value and info.distance then
-							table.insert(lines, info.distance .. "m")
-						end
-						
-						textLabel.Text = table.concat(lines, "\n")
-					end
-				elseif espBillboards[playerFolder.Name] then
-					-- Billboard was destroyed, remove it
-					espBillboards[playerFolder.Name] = nil
-				end
-			end
+
+	for _, character in pairs(livingThings:GetChildren()) do
+		if character == localChar then continue end
+		if not character:FindFirstChild("HumanoidRootPart") then continue end
+
+		local key      = character.Name
+		local headPart = character:FindFirstChild("FakeHead") or character:FindFirstChild("Head")
+		local rootPart = character:FindFirstChild("HumanoidRootPart")
+
+		activePlayers[key] = true
+
+		if not espBillboards[key] and headPart then
+			hideDisplayName(character)
+			espBillboards[key] = createBillboard(character, headPart)
+		end
+
+		if not espToolBillboards[key] and rootPart then
+			espToolBillboards[key] = createToolBillboard(rootPart)
+		end
+
+		local maxDist = Options.ESPMaxDistance.Value or 100
+		local info    = getPlayerInfo(character)
+
+		if espBillboards[key] then
+			espBillboards[key].MaxDistance = maxDist
+			updateBillboard(espBillboards[key], info)
+		end
+
+		if espToolBillboards[key] then
+			espToolBillboards[key].MaxDistance = maxDist
+			updateToolBillboard(espToolBillboards[key], info)
 		end
 	end
-	
-	if playerCount == 0 then
-		print("[ESP] LivingThings is empty")
-	end
-	
-	-- Remove billboards for players no longer in LivingThings
-	for key in pairs(espBillboards) do
+
+	for key, billboard in pairs(espBillboards) do
 		if not activePlayers[key] then
-			if espBillboards[key] and espBillboards[key].Parent then
-				espBillboards[key]:Destroy()
-			end
+			showDisplayName(key)
+			billboard:Destroy()
 			espBillboards[key] = nil
+		end
+	end
+
+	for key, billboard in pairs(espToolBillboards) do
+		if not activePlayers[key] then
+			billboard:Destroy()
+			espToolBillboards[key] = nil
 		end
 	end
 end)
 
--- Automatically update SaveManager theme
+-- ============================================================
+-- SAVE / THEME MANAGER
+-- ============================================================
+
 ThemeManager:SetLibrary(Library)
 SaveManager:SetLibrary(Library)
 SaveManager:IgnoreThemeSettings()
